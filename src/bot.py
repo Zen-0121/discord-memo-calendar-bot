@@ -40,93 +40,82 @@ class GoogleOnlyView(discord.ui.View):
 def is_trigger_emoji(payload: discord.RawReactionActionEvent) -> bool:
     return str(payload.emoji) == TRIGGER_EMOJI
 
-async def fetch_channel_and_message(payload: discord.RawReactionActionEvent):
-    guild = bot.get_guild(payload.guild_id) if payload.guild_id else None
-    if guild is None:
-        return None, None
-
-    channel = guild.get_channel(payload.channel_id)
-    if channel is None:
-        return None, None
-
-    # memoチャンネル以外は無視
-    if getattr(channel, "name", None) != MEMO_CHANNEL_NAME:
-        return None, None
-
-    try:
-        message = await channel.fetch_message(payload.message_id)
-    except (discord.NotFound, discord.Forbidden):
-        return None, None
-
-    return channel, message
-
-async def safe_delete_message(channel: discord.TextChannel, msg_id: str | None):
-    if not msg_id:
-        return
-    try:
-        m = await channel.fetch_message(int(msg_id))
-        await m.delete()
-    except Exception:
-        # 既に消えている/権限不足/取得できない 等は無視
-        pass
-
 async def handle_confirm(channel: discord.TextChannel, origin: discord.Message):
     key = str(origin.id)
     entry = state.get(key, {})
 
-    # 既に「確定返信」があるなら二重に出さない
-    if entry.get("status") == "confirmed" and entry.get("confirm_reply_id"):
-        return
-
     events = parse_events(origin.content)
     if not events:
         return
-
-    # 解除返信が残っていたら消す（見た目を綺麗にする）
-    await safe_delete_message(channel, entry.get("unconfirm_reply_id"))
-
-    # 1メッセージ複数行対応：返信を複数出すと散らかるので「最初の1件だけ」を返信にする
-    # 複数件全部やりたい場合は、返信文にまとめる形にするのがおすすめ。
     ev = events[0]
 
-    url = google_template_url(ev.title, ev.location, ev.start, ev.end, all_day=getattr(ev, "all_day", False))
-    label="Googleカレンダー（アプリで開く）"
+    url = google_template_url(
+        ev.title, ev.location, ev.start, ev.end,
+        all_day=getattr(ev, "all_day", False)
+    )
+
     embed = discord.Embed(title="📅 確定：Googleカレンダーに追加")
     embed.add_field(name="タイトル", value=ev.title, inline=False)
-    embed.add_field(name="日時", value=f"{ev.start:%Y/%m/%d %H:%M} - {ev.end:%H:%M}", inline=False)
+
+    if getattr(ev, "all_day", False):
+        embed.add_field(name="日時", value=f"{ev.start:%Y/%m/%d}（終日）", inline=False)
+    else:
+        embed.add_field(
+            name="日時",
+            value=f"{ev.start:%Y/%m/%d %H:%M} - {ev.end:%H:%M}",
+            inline=False
+        )
+
     embed.add_field(name="場所", value=ev.location or "（未設定）", inline=False)
     embed.set_footer(text="各自でリンクから追加してください")
 
-    sent = await origin.reply(embed=embed, view=GoogleOnlyView(url), mention_author=False)
+    # 既に返信メッセージがあるなら「編集」で上書き（増殖しない）
+    reply_id = entry.get("confirm_reply_id")
+    if reply_id:
+        try:
+            m = await channel.fetch_message(int(reply_id))
+            await m.edit(embed=embed, view=GoogleOnlyView(url))
+        except Exception:
+            # 取れない/消えてる場合は新規で作り直す
+            sent = await origin.reply(embed=embed, view=GoogleOnlyView(url), mention_author=False)
+            state[key] = {"status": "confirmed", "confirm_reply_id": str(sent.id)}
+            save_state(state)
+            return
 
-    state[key] = {
-        "status": "confirmed",
-        "confirm_reply_id": str(sent.id),
-        "unconfirm_reply_id": None,
-    }
+        state[key] = {"status": "confirmed", "confirm_reply_id": str(reply_id)}
+        save_state(state)
+        return
+
+    # 返信が無いなら新規に1つ作る
+    sent = await origin.reply(embed=embed, view=GoogleOnlyView(url), mention_author=False)
+    state[key] = {"status": "confirmed", "confirm_reply_id": str(sent.id)}
     save_state(state)
+
 
 async def handle_unconfirm(channel: discord.TextChannel, origin: discord.Message):
     key = str(origin.id)
     entry = state.get(key, {})
+    reply_id = entry.get("confirm_reply_id")
 
-    # 確定していないなら何もしない
-    if entry.get("status") != "confirmed":
+    # 返信が無いなら何もしない（増やさない）
+    if not reply_id:
+        state[key] = {"status": "unconfirmed", "confirm_reply_id": None}
+        save_state(state)
         return
 
-    # 確定返信を消す（これで重複・増殖が止まる）
-    await safe_delete_message(channel, entry.get("confirm_reply_id"))
-
     embed = discord.Embed(title="🗑️ 確定が解除されました")
-    embed.description = "この予定は削除扱いになりました（各自のGoogleカレンダーに入れた分は手動で削除してください）。"
+    embed.description = (
+        "この予定は削除扱いになりました（各自のGoogleカレンダーに入れた分は手動で削除してください）。"
+    )
 
-    sent = await origin.reply(embed=embed, mention_author=False)
+    # 返信を削除せず「編集」して解除状態にする（これで2つに分離しない）
+    try:
+        m = await channel.fetch_message(int(reply_id))
+        await m.edit(embed=embed, view=None)
+    except Exception:
+        pass
 
-    state[key] = {
-        "status": "unconfirmed",
-        "confirm_reply_id": None,
-        "unconfirm_reply_id": str(sent.id),
-    }
+    state[key] = {"status": "unconfirmed", "confirm_reply_id": str(reply_id)}
     save_state(state)
 
 @bot.event
