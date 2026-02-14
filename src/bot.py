@@ -172,11 +172,12 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
 
 def main():
     if not DISCORD_TOKEN:
-        raise RuntimeError("DISCORD_TOKEN が未設定です。.env を確認してください。")
+        raise RuntimeError("DISCORD_TOKEN が未設定です")
 
-    # Render Web Service 用：ポートを開けるHTTPサーバーを別スレッドで起動
     from threading import Thread
     from .web import run_web
+
+    print("BOT: starting web thread")
     Thread(target=run_web, daemon=True).start()
 
     bot.run(DISCORD_TOKEN)
