@@ -1,6 +1,7 @@
 import re
 from dataclasses import dataclass
 from datetime import datetime
+print("PARSER_VERSION=9964ba5")
 
 # 例: 2/27 なんとか 13:45-15:25
 # 例: 2/27 なんとか『タイトル』13:45-15:25（スペース無しでもOK）
